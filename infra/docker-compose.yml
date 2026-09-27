@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cvis_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cvis_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cvis_secure_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-cvis_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cvis_user} -d ${POSTGRES_DB:-cvis_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: cvis_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ml-service:
+    build:
+      context: ../ml-service
+      dockerfile: Dockerfile
+    container_name: cvis_ml_service
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=INFO
+      - PORT=8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - ml_models:/root/.cache
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: cvis_backend
+    restart: unless-stopped
+    env_file:
+      - .env.example
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://cvis_user:cvis_secure_pass@postgres:5432/cvis_db
+      - REDIS_URL=redis://redis:6379/0
+      - ML_SERVICE_URL=http://ml-service:8001
+      - STORAGE_LOCAL_ROOT=/data/storage
+    ports:
+      - "8000:8000"
+    volumes:
+      - shared_storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ml-service:
+        condition: service_healthy
+
+  celery-worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: cvis_celery_worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.tasks.worker.celery_app", "worker", "--loglevel=info", "-B"]
+    env_file:
+      - .env.example
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://cvis_user:cvis_secure_pass@postgres:5432/cvis_db
+      - REDIS_URL=redis://redis:6379/0
+      - ML_SERVICE_URL=http://ml-service:8001
+      - STORAGE_LOCAL_ROOT=/data/storage
+    volumes:
+      - shared_storage:/data/storage
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: cvis_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  ml_models:
+  shared_storage:
